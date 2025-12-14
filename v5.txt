@@ -1,0 +1,246 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- 创建UI开关
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "PositionLockUI"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 220, 0, 90)
+frame.Position = UDim2.new(0, 10, 0, 10)
+frame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(100, 100, 120)
+stroke.Thickness = 1
+stroke.Parent = frame
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 12)
+corner.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0.45, 0)
+title.BackgroundTransparency = 1
+title.Text = "🚫 服务器位置锁定"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.TextScaled = true
+title.Font = Enum.Font.GothamBold
+title.Parent = frame
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Size = UDim2.new(1, -24, 0.45, 0)
+toggleButton.Position = UDim2.new(0, 12, 0.5, 8)
+toggleButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+toggleButton.Text = "开启锁定"
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.TextScaled = true
+toggleButton.Font = Enum.Font.GothamSemibold
+toggleButton.Parent = frame
+
+local buttonCorner = Instance.new("UICorner")
+buttonCorner.CornerRadius = UDim.new(0, 8)
+buttonCorner.Parent = toggleButton
+
+local buttonStroke = Instance.new("UIStroke")
+buttonStroke.Color = Color3.fromRGB(200, 50, 50)
+buttonStroke.Thickness = 1
+buttonStroke.Parent = toggleButton
+
+-- 变量
+local isLocked = false
+local moveDirection = Vector3.new()
+local bodyVelocity = nil
+local bodyAngular = nil
+local walkSpeed = 18  -- 略快于默认16
+local predictedPosition = Vector3.new()
+local serverPosition = Vector3.new()
+local shadowPart = nil
+local connections = {}
+
+-- 强制所有部件网络拥有（服务器无法纠正）
+local function setNetworkOwnerRecursive(model)
+    for _, obj in pairs(model:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            pcall(function() obj:SetNetworkOwner(LocalPlayer) end)
+        end
+    end
+end
+
+-- 输入处理（全局）
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.W then moveDirection = moveDirection + Vector3.new(0, 0, -1) end
+    if input.KeyCode == Enum.KeyCode.S then moveDirection = moveDirection + Vector3.new(0, 0, 1) end
+    if input.KeyCode == Enum.KeyCode.A then moveDirection = moveDirection + Vector3.new(-1, 0, 0) end
+    if input.KeyCode == Enum.KeyCode.D then moveDirection = moveDirection + Vector3.new(1, 0, 0) end
+    if input.KeyCode == Enum.KeyCode.Space then
+        -- 跳跃：直接设置状态，服务器看不到
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChild("Humanoid")
+            if hum then hum.Jump = true end
+        end
+    end
+    moveDirection = moveDirection.Unit
+end)
+
+UserInputService.InputEnded:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.W then moveDirection = moveDirection - Vector3.new(0, 0, -1) end
+    if input.KeyCode == Enum.KeyCode.S then moveDirection = moveDirection - Vector3.new(0, 0, 1) end
+    if input.KeyCode == Enum.KeyCode.A then moveDirection = moveDirection - Vector3.new(-1, 0, 0) end
+    if input.KeyCode == Enum.KeyCode.D then moveDirection = moveDirection - Vector3.new(1, 0, 0) end
+    moveDirection = moveDirection.Magnitude > 0 and moveDirection.Unit or Vector3.new()
+end)
+
+-- 开关
+toggleButton.MouseButton1Click:Connect(function()
+    isLocked = not isLocked
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    if isLocked then
+        -- 开启：记录服务器位置，创建物理控制器
+        serverPosition = root.Position
+        predictedPosition = serverPosition
+        toggleButton.Text = "关闭锁定"
+        toggleButton.BackgroundColor3 = Color3.fromRGB(50, 255, 50)
+        buttonStroke.Color = Color3.fromRGB(50, 200, 50)
+
+        -- 影子
+        if not shadowPart then
+            shadowPart = Instance.new("Part")
+            shadowPart.Name = "ShadowHRP"
+            shadowPart.Size = Vector3.new(4, 6, 2)
+            shadowPart.Anchored = true
+            shadowPart.CanCollide = false
+            shadowPart.Transparency = 0.4
+            shadowPart.BrickColor = BrickColor.new("Bright red")
+            shadowPart.Material = Enum.Material.Neon
+            shadowPart.Parent = Workspace
+        end
+
+        -- 强制网络拥有所有部件（关键！服务器无法物理纠正）
+        setNetworkOwnerRecursive(char)
+
+        -- 创建BodyVelocity锁定服务器位置（最稳定强制）
+        bodyVelocity = Instance.new("BodyVelocity")
+        bodyVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+        bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+        bodyVelocity.Parent = root
+
+        -- BodyAngularVelocity锁定旋转
+        bodyAngular = Instance.new("BodyAngularVelocity")
+        bodyAngular.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+        bodyAngular.AngularVelocity = Vector3.new(0, 0, 0)
+        bodyAngular.Parent = root
+
+        -- Humanoid状态锁定
+        local hum = char:FindFirstChild("Humanoid")
+        if hum then
+            hum.PlatformStand = true  -- 禁用默认移动
+        end
+
+    else
+        -- 关闭：清理
+        toggleButton.Text = "开启锁定"
+        toggleButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+        buttonStroke.Color = Color3.fromRGB(200, 50, 50)
+
+        if bodyVelocity then bodyVelocity:Destroy() end
+        if bodyAngular then bodyAngular:Destroy() end
+        if shadowPart then shadowPart.Position = Vector3.new(0, -1000, 0) end
+
+        local hum = char:FindFirstChild("Humanoid")
+        if hum then hum.PlatformStand = false end
+    end
+end)
+
+-- 角色重生处理
+LocalPlayer.CharacterAdded:Connect(function(char)
+    -- 清理旧连接
+    for _, conn in pairs(connections) do
+        conn:Disconnect()
+    end
+    connections = {}
+
+    char.ChildAdded:Wait()  -- 等待加载
+    task.wait(0.1)
+
+    local root = char:WaitForChild("HumanoidRootPart", 5)
+    local hum = char:WaitForChild("Humanoid", 5)
+    if not root or not hum then return end
+
+    -- 如果锁定，重置
+    if isLocked then
+        serverPosition = root.Position
+        predictedPosition = serverPosition
+        setNetworkOwnerRecursive(char)
+        -- 重新创建BodyVelocity等（在开关里会处理）
+    end
+
+    -- 【核心】RenderStepped: 本地视觉移动（每帧144+次，超丝滑）
+    connections.render = RunService.RenderStepped:Connect(function(dt)
+        if not isLocked then return end
+
+        local camera = Workspace.CurrentCamera
+        if not camera then return end
+
+        -- 基于相机计算移动向量
+        local camLook = camera.CFrame.LookVector
+        local camRight = camera.CFrame.RightVector
+        local moveVec = (camLook * moveDirection.Z + camRight * moveDirection.X) * walkSpeed * dt
+
+        -- 更新预测位置
+        predictedPosition = predictedPosition + moveVec
+
+        -- 【视觉】设置CFrame到预测位置（自己看到移动）
+        root.CFrame = CFrame.new(predictedPosition, predictedPosition + camLook)
+
+        -- 【影子】跟随服务器位置，但面向相机
+        if shadowPart then
+            shadowPart.CFrame = CFrame.new(serverPosition + Vector3.new(0, 3, 0), serverPosition + camLook)
+        end
+    end)
+
+    -- 【服务器强制】Stepped: 物理+位置双重锁定（服务器物理模拟前）
+    connections.stepped = RunService.Stepped:Connect(function()
+        if not isLocked then return end
+        pcall(function()
+            root.Position = serverPosition  -- 位置强制
+            root.Velocity = Vector3.new(0, 0, 0)  -- 速度清零
+            root.RotVelocity = Vector3.new(0, 0, 0)
+            if bodyVelocity then bodyVelocity.Velocity = Vector3.new(0,0,0) end
+        end)
+    end)
+
+    -- 【三重保险】Heartbeat: 额外强制（服务器物理后）
+    connections.heartbeat = RunService.Heartbeat:Connect(function()
+        if not isLocked then return end
+        pcall(function()
+            root.Position = serverPosition
+        end)
+    end)
+end)
+
+-- 初始化当前角色
+if LocalPlayer.Character then
+    task.spawn(function()
+        LocalPlayer.CharacterAdded:Fire(LocalPlayer.Character)
+    end)
+end
+
+print("🔒 超稳定服务器位置锁定加载完成！(三重循环 + BodyVelocity + NetworkOwner)")
+print("💡 开启后: 自己丝滑移动，别人永不动！支持跳跃/面向鼠标")
