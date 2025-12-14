@@ -1,0 +1,135 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- 创建UI开关
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "PositionLockUI"
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 200, 0, 80)
+frame.Position = UDim2.new(0, 10, 0, 10)
+frame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 10)
+corner.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0.5, 0)
+title.Position = UDim2.new(0, 0, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "位置锁定开关"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.TextScaled = true
+title.Font = Enum.Font.GothamBold
+title.Parent = frame
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Size = UDim2.new(1, -20, 0.4, 0)
+toggleButton.Position = UDim2.new(0, 10, 0.5, 10)
+toggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+toggleButton.Text = "开启锁定"
+toggleButton.TextColor3 = Color3.new(1, 1, 1)
+toggleButton.TextScaled = true
+toggleButton.Font = Enum.Font.Gotham
+toggleButton.Parent = frame
+
+local buttonCorner = Instance.new("UICorner")
+buttonCorner.CornerRadius = UDim.new(0, 8)
+buttonCorner.Parent = toggleButton
+
+local isLocked = false
+local moveDirection = Vector3.new(0, 0, 0)
+local walkSpeed = 16  -- 移动速度
+local predictedPosition = Vector3.new()
+local shadowPart = nil  -- 影子Part代表“服务器位置”
+
+-- 切换开关
+toggleButton.MouseButton1Click:Connect(function()
+    isLocked = not isLocked
+    local character = LocalPlayer.Character
+    if not character then return end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    
+    if isLocked then
+        -- 开启：记录当前位置作为“服务器位置”，创建影子Part
+        predictedPosition = hrp.Position
+        toggleButton.Text = "关闭锁定"
+        toggleButton.BackgroundColor3 = Color3.fromRGB(0, 255, 0)
+        
+        -- 创建影子Part（可视化服务器固定位置）
+        if not shadowPart then
+            shadowPart = Instance.new("Part")
+            shadowPart.Size = Vector3.new(4, 5, 2)  -- 角色大小
+            shadowPart.Anchored = true
+            shadowPart.Transparency = 0.5
+            shadowPart.BrickColor = BrickColor.new("Bright red")
+            shadowPart.Parent = Workspace
+        end
+        shadowPart.Position = predictedPosition + Vector3.new(0, 2.5, 0)  -- 略抬高
+    else
+        -- 关闭：移除影子
+        toggleButton.Text = "开启锁定"
+        toggleButton.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+        if shadowPart then
+            shadowPart.Position = Vector3.new(0, -100, 0)  -- 移出视野而不是销毁
+        end
+    end
+end)
+
+-- 等待角色加载
+LocalPlayer.CharacterAdded:Connect(function(character)
+    local humanoid = character:WaitForChild("Humanoid")
+    local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+    predictedPosition = humanoidRootPart.Position  -- 重置
+    
+    -- 设置网络所有权为本地玩家（允许本地控制物理，减少服务器干预）
+    humanoidRootPart:SetNetworkOwner(LocalPlayer)
+    
+    -- 输入处理（WASD移动）
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == Enum.KeyCode.W then moveDirection = moveDirection + Vector3.new(0, 0, -1) end
+        if input.KeyCode == Enum.KeyCode.S then moveDirection = moveDirection + Vector3.new(0, 0, 1) end
+        if input.KeyCode == Enum.KeyCode.A then moveDirection = moveDirection + Vector3.new(-1, 0, 0) end
+        if input.KeyCode == Enum.KeyCode.D then moveDirection = moveDirection + Vector3.new(1, 0, 0) end
+        moveDirection = moveDirection.Unit or Vector3.new()
+    end)
+    
+    UserInputService.InputEnded:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == Enum.KeyCode.W then moveDirection = moveDirection - Vector3.new(0, 0, -1) end
+        if input.KeyCode == Enum.KeyCode.S then moveDirection = moveDirection - Vector3.new(0, 0, 1) end
+        if input.KeyCode == Enum.KeyCode.A then moveDirection = moveDirection - Vector3.new(-1, 0, 0) end
+        if input.KeyCode == Enum.KeyCode.D then moveDirection = moveDirection - Vector3.new(1, 0, 0) end
+        moveDirection = (moveDirection.Magnitude > 0) and moveDirection.Unit or Vector3.new()
+    end)
+    
+    -- 本地移动预测循环（每帧更新）
+    RunService.Heartbeat:Connect(function(deltaTime)
+        if isLocked then
+            -- 锁定位置：直接设置位置，而非使用CFrame
+            local camera = Workspace.CurrentCamera
+            local moveVector = (camera.CFrame.LookVector * moveDirection.Z + camera.CFrame.RightVector * moveDirection.X) * walkSpeed * deltaTime
+            predictedPosition = predictedPosition + moveVector
+
+            -- 锁定位置并设置HumanoidRootPart的位置
+            humanoidRootPart.Position = predictedPosition
+            -- 设置朝向
+            humanoidRootPart.CFrame = CFrame.lookAt(humanoidRootPart.Position, humanoidRootPart.Position + camera.CFrame.LookVector)
+            
+            -- 更新影子Part位置
+            if shadowPart then
+                shadowPart.Position = predictedPosition + Vector3.new(0, 2.5, 0)
+            end
+        end
+    end)
+end)
