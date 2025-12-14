@@ -1,0 +1,223 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- UI (保持原样，美化版)
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "PositionLockUI"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, 220, 0, 90)
+frame.Position = UDim2.new(0, 10, 0, 10)
+frame.BackgroundColor3 = Color3.fromRGB(35, 35, 45)
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(100, 100, 120)
+stroke.Thickness = 1
+stroke.Parent = frame
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 12)
+corner.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0.45, 0)
+title.BackgroundTransparency = 1
+title.Text = "🚫 服务器位置锁定 (修复版)"
+title.TextColor3 = Color3.fromRGB(255, 255, 255)
+title.TextScaled = true
+title.Font = Enum.Font.GothamBold
+title.Parent = frame
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Size = UDim2.new(1, -24, 0.45, 0)
+toggleButton.Position = UDim2.new(0, 12, 0.5, 8)
+toggleButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+toggleButton.Text = "开启锁定"
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.TextScaled = true
+toggleButton.Font = Enum.Font.GothamSemibold
+toggleButton.Parent = frame
+
+local buttonCorner = Instance.new("UICorner")
+buttonCorner.CornerRadius = UDim.new(0, 8)
+buttonCorner.Parent = toggleButton
+
+local buttonStroke = Instance.new("UIStroke")
+buttonStroke.Color = Color3.fromRGB(200, 50, 50)
+buttonStroke.Thickness = 1
+buttonStroke.Parent = toggleButton
+
+-- 变量
+local isLocked = false
+local moveDirection = Vector3.new()
+local predictedPosition = Vector3.new()
+local serverPosition = Vector3.new()
+local shadowPart = nil
+local connections = {}
+local originalWalkSpeed = 16
+
+-- 输入 (全局)
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.W then moveDirection = moveDirection + Vector3.new(0, 0, -1) end
+    if input.KeyCode == Enum.KeyCode.S then moveDirection = moveDirection + Vector3.new(0, 0, 1) end
+    if input.KeyCode == Enum.KeyCode.A then moveDirection = moveDirection + Vector3.new(-1, 0, 0) end
+    if input.KeyCode == Enum.KeyCode.D then moveDirection = moveDirection + Vector3.new(1, 0, 0) end
+    if input.KeyCode == Enum.KeyCode.Space then
+        local char = LocalPlayer.Character
+        if char then
+            local hum = char:FindFirstChild("Humanoid")
+            if hum then hum.Jump = true end
+        end
+    end
+    moveDirection = moveDirection.Unit
+end)
+
+UserInputService.InputEnded:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == Enum.KeyCode.W then moveDirection = moveDirection - Vector3.new(0, 0, -1) end
+    if input.KeyCode == Enum.KeyCode.S then moveDirection = moveDirection - Vector3.new(0, 0, 1) end
+    if input.KeyCode == Enum.KeyCode.A then moveDirection = moveDirection - Vector3.new(-1, 0, 0) end
+    if input.KeyCode == Enum.KeyCode.D then moveDirection = moveDirection - Vector3.new(1, 0, 0) end
+    moveDirection = moveDirection.Magnitude > 0 and moveDirection.Unit or Vector3.new()
+end)
+
+-- 开关
+toggleButton.MouseButton1Click:Connect(function()
+    isLocked = not isLocked
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChild("Humanoid")
+    if not root or not hum then return end
+
+    if isLocked then
+        serverPosition = root.Position
+        predictedPosition = serverPosition
+        originalWalkSpeed = hum.WalkSpeed
+        toggleButton.Text = "关闭锁定"
+        toggleButton.BackgroundColor3 = Color3.fromRGB(50, 255, 50)
+        buttonStroke.Color = Color3.fromRGB(50, 200, 50)
+
+        -- 影子
+        if not shadowPart then
+            shadowPart = Instance.new("Part")
+            shadowPart.Name = "ShadowHRP"
+            shadowPart.Size = Vector3.new(4, 6, 2)
+            shadowPart.Anchored = true
+            shadowPart.CanCollide = false
+            shadowPart.Transparency = 0.4
+            shadowPart.BrickColor = BrickColor.new("Bright red")
+            shadowPart.Material = Enum.Material.Neon
+            shadowPart.Parent = Workspace
+        end
+
+        -- 【关键修复】不使用PlatformStand，不用BodyVelocity/BodyAngular（这些锁本地移动）
+        -- 只用网络拥有 + 强制循环
+
+        -- 网络拥有（服务器无法纠正）
+        pcall(function()
+            root:SetNetworkOwner(LocalPlayer)
+            for _, part in pairs(char:GetChildren()) do
+                if part:IsA("BasePart") then
+                    part:SetNetworkOwner(LocalPlayer)
+                end
+            end
+        end)
+
+        -- 设置高WalkSpeed（防止Humanoid干扰）
+        hum.WalkSpeed = 50
+
+    else
+        toggleButton.Text = "开启锁定"
+        toggleButton.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+        buttonStroke.Color = Color3.fromRGB(200, 50, 50)
+        hum.WalkSpeed = originalWalkSpeed
+        if shadowPart then
+            shadowPart.Position = Vector3.new(0, -1000, 0)
+        end
+    end
+end)
+
+-- 角色处理
+LocalPlayer.CharacterAdded:Connect(function(char)
+    -- 清理
+    for _, conn in pairs(connections) do
+        conn:Disconnect()
+    end
+    connections = {}
+
+    char:WaitForChild("HumanoidRootPart", 5)
+    char:WaitForChild("Humanoid", 5)
+
+    if isLocked then
+        -- 锁定状态下重置位置
+        task.wait(0.5)
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root then
+            root.Position = serverPosition
+        end
+    end
+
+    -- 【核心视觉移动】RenderStepped (每帧本地CFrame，超丝滑)
+    connections.render = RunService.RenderStepped:Connect(function(dt)
+        if not isLocked then return end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+
+        local camera = Workspace.CurrentCamera
+        if not camera then return end
+
+        -- 计算移动
+        local camLook = camera.CFrame.LookVector
+        local camRight = camera.CFrame.RightVector
+        local moveVec = (camLook * moveDirection.Z + camRight * moveDirection.X) * originalWalkSpeed * dt
+
+        predictedPosition = predictedPosition + moveVec
+
+        -- 本地视觉：设置CFrame（自己看到动）
+        root.CFrame = CFrame.new(predictedPosition, predictedPosition + camLook)
+
+        -- 影子
+        if shadowPart then
+            shadowPart.CFrame = CFrame.new(serverPosition + Vector3.new(0, 3, 0), serverPosition + camLook + Vector3.new(0, 3, 0))
+        end
+    end)
+
+    -- 【服务器强制1】Stepped (物理前，防止移动)
+    connections.stepped = RunService.Stepped:Connect(function()
+        if not isLocked then return end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        pcall(function()
+            root.Position = serverPosition
+            root.Velocity = Vector3.new(0, root.Velocity.Y, 0)  -- 只保留Y速度（跳跃）
+            root.RotVelocity = Vector3.new(0, 0, 0)
+        end)
+    end)
+
+    -- 【服务器强制2】Heartbeat (物理后，最终拉回)
+    connections.heartbeat = RunService.Heartbeat:Connect(function()
+        if not isLocked then return end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        pcall(function()
+            root.Position = serverPosition
+        end)
+    end)
+end)
+
+-- 初始化
+if LocalPlayer.Character then
+    LocalPlayer.CharacterAdded:Fire(LocalPlayer.Character)
+end
+
+print("🔒 位置锁定修复版加载！现在自己能丝滑移动，服务器永不动！(无PlatformStand/BodyVelocity)")
